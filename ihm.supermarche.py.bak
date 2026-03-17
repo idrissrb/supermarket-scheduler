@@ -1,0 +1,1133 @@
+import sys
+import gurobipy as gp
+from gurobipy import GRB
+
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QTextEdit,
+    QHBoxLayout, QSpinBox, QGroupBox, QFormLayout, QGridLayout, QSizePolicy,
+    QSpacerItem, QInputDialog, QMessageBox, QDialog, QDialogButtonBox,
+    QListWidget, QListWidgetItem, QLineEdit, QTableWidget, QTableWidgetItem, QComboBox, QDoubleSpinBox
+)
+from PyQt6.QtGui import QFont, QColor, QPalette
+from PyQt6.QtCore import Qt
+
+# Matplotlib QtAgg for PyQt6
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+import matplotlib.ticker as mtick
+import numpy as np
+ 
+# Theme helper import (try to be robust about module path)
+try:
+    from theme import apply_dark_theme
+except Exception:
+    import sys, pathlib
+    sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+    from theme import apply_dark_theme
+
+# Common HTML snippets used in results display to avoid duplication
+RESULT_WRAPPER_START = '<div style="font-family:Segoe UI, Roboto, Arial; color:#dff6f2;">'
+RESULT_WRAPPER_END = '</div>'
+TH_STYLE = "text-align:left;padding:6px 12px;color:#bfefff;border-bottom:2px solid #123233;"
+TD_STYLE = "padding:6px 12px;border-bottom:1px solid #122224;"
+
+class RolesDialog(QDialog):
+    """
+    Simple dialog to add / remove / edit employee types and their hourly cost.
+    Returns a dict {role_name: cost} when accepted.
+    """
+    def __init__(self, parent, roles):
+        super().__init__(parent)
+        self.setWindowTitle("Gérer les rôles")
+        self.resize(380, 320)
+        self.roles = dict(roles)  # copy
+
+        layout = QVBoxLayout(self)
+        self.listw = QListWidget()
+        layout.addWidget(self.listw)
+
+        self._refresh_list()
+
+        btns_layout = QHBoxLayout()
+        self.btn_add = QPushButton("Ajouter")
+        self.btn_edit = QPushButton("Modifier coût")
+        self.btn_rename = QPushButton("Renommer")
+        self.btn_remove = QPushButton("Supprimer")
+        btns_layout.addWidget(self.btn_add)
+        btns_layout.addWidget(self.btn_edit)
+        btns_layout.addWidget(self.btn_rename)
+        btns_layout.addWidget(self.btn_remove)
+        layout.addLayout(btns_layout)
+
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        layout.addWidget(box)
+
+        self.btn_add.clicked.connect(self._on_add)
+        self.btn_remove.clicked.connect(self._on_remove)
+        self.btn_edit.clicked.connect(self._on_edit_cost)
+        self.btn_rename.clicked.connect(self._on_rename)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+
+    def _refresh_list(self):
+        self.listw.clear()
+        for r, c in sorted(self.roles.items()):
+            it = QListWidgetItem(f"{r} — {float(c):.2f} Dinars/h")
+            it.setData(Qt.ItemDataRole.UserRole, r)
+            self.listw.addItem(it)
+
+    def _on_add(self):
+        name, ok = QInputDialog.getText(self, "Nouveau rôle", "Nom du rôle :")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in self.roles:
+            QMessageBox.warning(self, "Erreur", "Rôle déjà existant.")
+            return
+        cost, ok2 = QInputDialog.getDouble(self, "Coût horaire", f"Coût pour '{name}' (Dinars/h):", 10.0, 0.0, 100000.0, decimals=2)
+        if not ok2:
+            return
+        self.roles[name] = cost
+        self._refresh_list()
+
+    def _on_remove(self):
+        it = self.listw.currentItem()
+        if not it:
+            return
+        name = it.data(Qt.ItemDataRole.UserRole)
+        resp = QMessageBox.question(self, "Supprimer", f"Supprimer le rôle '{name}' ?")
+        if resp == QMessageBox.StandardButton.Yes:
+            self.roles.pop(name, None)
+            self._refresh_list()
+
+    def _on_edit_cost(self):
+        it = self.listw.currentItem()
+        if not it:
+            return
+        name = it.data(Qt.ItemDataRole.UserRole)
+        cur = self.roles.get(name, 0)
+        cost, ok = QInputDialog.getDouble(self, "Modifier coût", f"Coût horaire pour '{name}' (Dinars/h):", float(cur), 0.0, 100000.0, decimals=2)
+        if not ok:
+            return
+        self.roles[name] = cost
+        self._refresh_list()
+
+    def _on_rename(self):
+        it = self.listw.currentItem()
+        if not it:
+            return
+        old = it.data(Qt.ItemDataRole.UserRole)
+        new, ok = QInputDialog.getText(self, "Renommer rôle", "Nouveau nom :", text=old)
+        if not ok or not new.strip():
+            return
+        new = new.strip()
+        if new in self.roles and new != old:
+            QMessageBox.warning(self, "Erreur", "Un rôle avec ce nom existe déjà.")
+            return
+        self.roles[new] = self.roles.pop(old)
+        self._refresh_list()
+
+    def get_roles(self):
+        return dict(self.roles)
+
+
+class StartDialog(QDialog):
+    """
+    Initial dialog shown at app start. Allows setting commerce name and editing roles.
+    On accept returns chosen commerce_name and roles dict.
+    """
+    def __init__(self, parent=None, commerce_name="Supermarché", roles=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configuration initiale")
+        self.resize(520, 320)
+        # apply shared theme to this dialog
+        try:
+            apply_dark_theme(self)
+        except Exception:
+            # best-effort: ignore theme errors
+            pass
+        self._roles = dict(roles or {"vendeur": 10, "caissier": 11, "securite": 9})
+        self._commerce_name = commerce_name
+
+        layout = QVBoxLayout(self)
+
+        lbl = QLabel("Définissez le nom du commerce et les types d'employés avant de continuer")
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Nom du commerce:"))
+        self.name_edit = QLineEdit(self._commerce_name)
+        name_row.addWidget(self.name_edit)
+        layout.addLayout(name_row)
+
+        layout.addWidget(QLabel("Rôles actuels:"))
+        self.roles_list = QListWidget()
+        layout.addWidget(self.roles_list, stretch=1)
+        self._refresh_roles_list()
+
+        btns_row = QHBoxLayout()
+        self.btn_edit_roles = QPushButton("Gérer rôles...")
+        self.btn_edit_roles.clicked.connect(self._open_roles_dialog)
+        btns_row.addWidget(self.btn_edit_roles)
+        btns_row.addStretch()
+        layout.addLayout(btns_row)
+
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        layout.addWidget(box)
+
+    def _refresh_roles_list(self):
+        self.roles_list.clear()
+        for r, c in sorted(self._roles.items()):
+            it = QListWidgetItem(f"{r} — {float(c):.2f} Dinars/h")
+            it.setData(Qt.ItemDataRole.UserRole, r)
+            self.roles_list.addItem(it)
+
+    def _open_roles_dialog(self):
+        dlg = RolesDialog(self, self._roles)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new = dlg.get_roles()
+            if not new:
+                QMessageBox.warning(self, "Rôles", "Il faut au moins un rôle.")
+                return
+            self._roles = new
+            self._refresh_roles_list()
+
+    def accept(self) -> None:
+        name = self.name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Nom requis", "Entrez un nom pour le commerce.")
+            return
+        if not self._roles:
+            QMessageBox.warning(self, "Rôles requis", "Définissez au moins un rôle.")
+            return
+        self._commerce_name = name
+        super().accept()
+
+    def get_values(self):
+        return self._commerce_name, dict(self._roles)
+
+
+class FenetrePrincipale(QWidget):
+    def __init__(self, commerce_name=None, roles=None):
+        super().__init__()
+
+        # commerce name and roles (start with provided or defaults)
+        self.commerce_name = commerce_name or "Supermarché"
+        self.roles = dict(roles or {"vendeur": 10.0, "caissier": 11.0, "securite": 9.0})
+
+        # base demand used to prefill the demand table (kept for sensible defaults)
+        self.base_demande = {
+            7:  {"vendeur": 3, "caissier": 2, "securite": 1},
+            8:  {"vendeur": 4, "caissier": 3, "securite": 1},
+            9:  {"vendeur": 5, "caissier": 4, "securite": 1},
+            10: {"vendeur": 6, "caissier": 5, "securite": 1},
+            11: {"vendeur": 6, "caissier": 5, "securite": 1},
+            12: {"vendeur": 7, "caissier": 6, "securite": 2},
+            13: {"vendeur": 7, "caissier": 6, "securite": 2},
+            14: {"vendeur": 6, "caissier": 5, "securite": 2},
+            15: {"vendeur": 6, "caissier": 5, "securite": 2},
+            16: {"vendeur": 7, "caissier": 6, "securite": 2},
+            17: {"vendeur": 8, "caissier": 7, "securite": 2},
+            18: {"vendeur": 9, "caissier": 8, "securite": 2},
+            19: {"vendeur": 8, "caissier": 7, "securite": 2},
+            20: {"vendeur": 6, "caissier": 5, "securite": 2},
+            21: {"vendeur": 4, "caissier": 3, "securite": 1},
+        }
+        
+        self.setWindowTitle(f"Planification du personnel - {self.commerce_name}")
+        self.setMinimumSize(980, 640)
+
+        # store scenarios in-memory
+        self.scenarios = {}  # name -> scenario dict
+        self.last_results = None  # populated after resoudre()
+
+        # Hover/annotation state
+        self._hover_cid = None
+        self._annot = None
+        self._hover_ax = None
+        self._hover_data = None  # (heures_arr, totals, per_hour_role)
+
+        # Dark theme palette for better contrast / readability
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Window, QColor("#0f1720"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor("#e6eef8"))
+        pal.setColor(QPalette.ColorRole.Base, QColor("#0b1114"))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#0e1417"))
+        pal.setColor(QPalette.ColorRole.Text, QColor("#e6eef8"))
+        pal.setColor(QPalette.ColorRole.Button, QColor("#04282b"))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#e6eef8"))
+        self.setPalette(pal)
+
+        # Unified dark stylesheet, tuned for readability
+        self.setStyleSheet("""
+            QWidget {
+                font-family: "Segoe UI", Roboto, Arial, sans-serif;
+                color: #E6EEF8;
+                background: #0f1720;
+            }
+            QGroupBox {
+                background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #0b1114, stop:1 #0f1418);
+                border: 1px solid #1f2a30;
+                border-radius: 10px;
+                margin-top: 8px;
+                padding: 10px;
+            }
+            QGroupBox:title {
+                subcontrol-origin: margin;
+                subcontrol-position: top center;
+                padding: 6px 12px;
+                color: #9fe9ff;
+                font-weight: 700;
+            }
+            QLabel#mainTitle {
+                color: #7be0ff;
+                font-size: 20px;
+                font-weight: 800;
+            }
+            QLabel#subtitle {
+                color: #9fb6c6;
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #16a085;
+                color: #eafaf6;
+                padding: 8px 14px;
+                border-radius: 8px;
+                font-weight: 700;
+                border: none;
+                min-height: 34px;
+            }
+            QPushButton#secondary {
+                background-color: #e67e22;
+                color: #2b1100;
+            }
+            QPushButton:hover { opacity: 0.95; }
+            QTextEdit {
+                background: #071012;
+                color: #e6eef8;
+                border: 1px solid #123033;
+                border-radius: 8px;
+                padding: 8px;
+            }
+            QSpinBox, QAbstractSpinBox {
+                background: #071012;
+                color: #e6eef8;
+                border: 1px solid #123033;
+                border-radius: 6px;
+                padding: 4px;
+            }
+        """)
+
+        # Title area
+        title_layout = QVBoxLayout()
+        self.title_label = QLabel(f"{self.commerce_name} — Planification des quarts")
+        self.title_label.setObjectName("mainTitle")
+        title_font = QFont()
+        title_font.setPointSize(18)
+        title_font.setBold(True)
+        self.title_label.setFont(title_font)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        subtitle = QLabel("Optimisez le nombre d'employés et visualisez clairement l'effectif horaire")
+        subtitle.setObjectName("subtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title_layout.addWidget(self.title_label)
+        title_layout.addWidget(subtitle)
+
+        # Left: inputs (costs + actions)
+        grp_couts = QGroupBox("Coûts horaires")
+        # keep form as attribute so we can rebuild rows when roles change
+        self.form_couts = QFormLayout()
+        self.form_couts.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        grp_couts.setLayout(self.form_couts)
+        # constrain left column width so it's visually smaller than right
+        grp_couts.setMaximumWidth(520)
+
+        # role spin widgets map
+        self.role_spins = {}
+        self._build_roles_ui()  # populate with initial roles
+
+        # Constraints group (demand table, shift length, min security, opening/closing)
+        grp_constraints = QGroupBox("Contraintes")
+        c_layout = QVBoxLayout()
+
+        # opening / closing controls
+        hours_row = QHBoxLayout()
+        hours_row.addWidget(QLabel("Heure d'ouverture :"))
+        self.opening_spin = QSpinBox()
+        self.opening_spin.setRange(0, 23)
+        self.opening_spin.setValue(7)
+        hours_row.addWidget(self.opening_spin)
+
+        hours_row.addSpacing(12)
+        hours_row.addWidget(QLabel("Heure de fermeture :"))
+        self.closing_spin = QSpinBox()
+        self.closing_spin.setRange(1, 24)
+        self.closing_spin.setValue(22)
+        hours_row.addWidget(self.closing_spin)
+        hours_row.addStretch()
+        c_layout.addLayout(hours_row)
+
+        # heures list derived from opening/closing (rows are opening..closing-1)
+        self.heures = list(range(self.opening_spin.value(), self.closing_spin.value()))
+
+        # demand table: rows = opening..closing-1, cols = current roles
+        self.table_demande = QTableWidget(len(self.heures), len(self.roles))
+        self.table_demande.setHorizontalHeaderLabels([r.capitalize() for r in self.roles.keys()])
+        self._fill_demande_table_with_defaults()
+        c_layout.addWidget(QLabel("Demande par heure (double‑clic pour éditer) :"))
+        c_layout.addWidget(self.table_demande)
+
+        # Make table expand horizontally but fixed vertically to show all rows without scroll
+        # Allow the table to expand vertically and show a vertical scrollbar when content exceeds available space.
+        self.table_demande.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.table_demande.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table_demande.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # keep row/column sizes updated, but don't force a fixed maximum height so scrollbar can appear
+        self.table_demande.resizeColumnsToContents()
+        self.table_demande.resizeRowsToContents()
+        self._adjust_demande_table_height()
+
+        # connect opening/closing changes
+        self.opening_spin.valueChanged.connect(self._on_hours_changed)
+        self.closing_spin.valueChanged.connect(self._on_hours_changed)
+
+        # shift length selector
+        shift_row = QHBoxLayout()
+        shift_row.addWidget(QLabel("Longueur de shift :"))
+        self.shift_combo = QComboBox()
+        for v in ("6", "8", "10"):
+            self.shift_combo.addItem(f"{v}h", int(v))
+        self.shift_combo.setCurrentIndex(1)  # default 8h
+        shift_row.addWidget(self.shift_combo)
+        shift_row.addStretch()
+        c_layout.addLayout(shift_row)
+
+        # minimum security spinbox
+        sec_row = QHBoxLayout()
+        sec_row.addWidget(QLabel("Sécurité min. (agents) :"))
+        self.min_security_spin = QSpinBox()
+        self.min_security_spin.setRange(0, 100)
+        self.min_security_spin.setValue(1)
+        sec_row.addWidget(self.min_security_spin)
+        sec_row.addStretch()
+        c_layout.addLayout(sec_row)
+
+        grp_constraints.setLayout(c_layout)
+        grp_constraints.setMaximumWidth(520)  # make constraints area visibly larger
+
+        # Actions group
+        grp_actions = QGroupBox("Actions")
+        # Use a compact grid (2 columns) so buttons wrap naturally and do not overlap
+        actions_grid = QGridLayout()
+        actions_grid.setHorizontalSpacing(8)
+        actions_grid.setVerticalSpacing(8)
+        actions_grid.setContentsMargins(6, 6, 6, 6)
+
+        self.bouton = QPushButton("Résoudre")
+        self.bouton.setObjectName("primary")
+        self.bouton.clicked.connect(self.resoudre)
+
+        self.bouton_clear = QPushButton("Effacer")
+        self.bouton_clear.setObjectName("secondary")
+        self.bouton_clear.clicked.connect(self.zone_resultat_clear)
+
+        self.bouton_save = QPushButton("Sauvegarder scénario")
+        self.bouton_save.clicked.connect(self.save_scenario)
+        self.bouton_compare = QPushButton("Comparer scénarios")
+        self.bouton_compare.clicked.connect(self.compare_scenarios)
+
+        # place buttons in a 2x2 grid (management buttons removed from page 2)
+        actions_grid.addWidget(self.bouton, 0, 0)
+        actions_grid.addWidget(self.bouton_clear, 0, 1)
+        actions_grid.addWidget(self.bouton_save, 1, 0)
+        actions_grid.addWidget(self.bouton_compare, 1, 1)
+
+        # Make buttons expand to fill their grid cell but avoid huge minimum widths.
+        all_buttons = [self.bouton, self.bouton_clear, self.bouton_save, self.bouton_compare]
+        for b in all_buttons:
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setMinimumHeight(36)
+            # allow horizontal shrinking but keep readable text; avoid large fixed min widths
+            b.setMinimumWidth(100)
+
+        grp_actions.setLayout(actions_grid)
+        # keep left column visibly smaller than the graph area
+        grp_actions.setMaximumWidth(520)
+
+        left_col = QVBoxLayout()
+        left_col.addWidget(grp_couts)
+        left_col.addWidget(grp_constraints)
+        left_col.addWidget(grp_actions)
+        left_col.addStretch()
+
+        # Make left groups expand vertically so the left column's bottom aligns
+        # with the right column (graph + résultats). Set proportional stretches:
+        # costs (small), contraintes (dominant), actions (secondary).
+        # Indices: 0 = grp_couts, 1 = grp_constraints, 2 = grp_actions, 3 = stretch
+        left_col.setStretch(0, 1)
+        left_col.setStretch(1, 3)
+        left_col.setStretch(2, 2)
+
+        # Allow the constraints and actions group boxes to expand vertically
+        grp_constraints.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        grp_actions.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        # Right: graph + results (no table)
+        grp_graph = QGroupBox("Graphique - Effectif total par heure")
+        vbox_graph = QVBoxLayout()
+        self.figure = Figure(figsize=(6, 3), dpi=100, facecolor="#0f1720")
+        self.canvas = FigureCanvas(self.figure)
+        vbox_graph.addWidget(self.canvas)
+        grp_graph.setLayout(vbox_graph)
+
+        # Results display: improved, HTML-styled
+        grp_resultats = QGroupBox("Détails - Résultats")
+        vbox_result = QVBoxLayout()
+        self.zone_resultat = QTextEdit()
+        self.zone_resultat.setReadOnly(True)
+        # Use HTML to make the results clearer and more attractive
+        self.zone_resultat.setAcceptRichText(True)
+        vbox_result.addWidget(self.zone_resultat)
+        grp_resultats.setLayout(vbox_result)
+
+        right_col = QVBoxLayout()
+        right_col.addWidget(grp_graph, stretch=3)
+        right_col.addWidget(grp_resultats, stretch=2)
+
+        # Assemble main grid
+        main_grid = QGridLayout()
+        main_grid.addLayout(left_col, 0, 0)
+        main_grid.addLayout(right_col, 0, 1)
+        # make right column larger than left (left small, right dominant)
+        main_grid.setColumnStretch(0, 2)
+        main_grid.setColumnStretch(1, 5)
+        main_grid.setHorizontalSpacing(20)
+        main_grid.setVerticalSpacing(10)
+
+        # Footer / status
+        self.status = QLabel("Prêt")
+        self.status.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.status.setStyleSheet("color: #9fb6c6; font-size: 11px; padding: 6px;")
+
+        # Compose final layout
+        layout = QVBoxLayout()
+        layout.addLayout(title_layout)
+        layout.addSpacing(8)
+        layout.addLayout(main_grid)
+        layout.addWidget(self.status)
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.setLayout(layout)
+
+        # Prepare empty plot and empty text
+        self._init_empty_plot()
+        self.zone_resultat.setHtml(self._empty_result_html())
+
+    def _fill_demande_table_with_defaults(self):
+        """Populate the demande table using current self.heures and self.roles with base_demande defaults."""
+        self.table_demande.setRowCount(len(self.heures))
+        self.table_demande.setColumnCount(len(self.roles))
+        self.table_demande.setHorizontalHeaderLabels([r.capitalize() for r in self.roles.keys()])
+        self.table_demande.setVerticalHeaderLabels([f"{h}h" for h in self.heures])
+        for ri, h in enumerate(self.heures):
+            for ci, role in enumerate(self.roles.keys()):
+                val = int(self.base_demande.get(h, {}).get(role, 0))
+                item = QTableWidgetItem(str(val))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_demande.setItem(ri, ci, item)
+        self.table_demande.resizeColumnsToContents()
+        self.table_demande.resizeRowsToContents()
+
+    def _adjust_demande_table_height(self):
+        """Adjust the table minimum height so the header and a few rows are visible; allow scrolling for the rest."""
+        self.table_demande.resizeRowsToContents()
+        header_h = self.table_demande.horizontalHeader().height()
+        rows_h = sum(self.table_demande.rowHeight(i) for i in range(self.table_demande.rowCount()))
+        frame = 2 * self.table_demande.frameWidth()
+        margin = 12
+        total_h = header_h + rows_h + frame + margin
+        # set a reasonable minimum so header + a few rows are visible,
+        # but do NOT set a strict maximum: let the widget expand and show a scrollbar when needed.
+        min_visible = min(total_h, 320)
+        self.table_demande.setMinimumHeight(min_visible)
+        # ensure the widget can still grow with layout (no maximum enforced)
+        try:
+            self.table_demande.setMaximumHeight(16777215)  # Qt default "no limit"
+        except Exception:
+            pass
+
+    def _on_hours_changed(self):
+        """Handle opening/closing hour updates and rebuild the demande table rows."""
+        opening = int(self.opening_spin.value())
+        closing = int(self.closing_spin.value())
+        if closing <= opening:
+            QMessageBox.warning(self, "Heures invalides", "L'heure de fermeture doit être strictement supérieure à l'heure d'ouverture.")
+            # revert to previous sensible values
+            self.opening_spin.blockSignals(True)
+            self.closing_spin.blockSignals(True)
+            self.opening_spin.setValue(7)
+            self.closing_spin.setValue(22)
+            self.opening_spin.blockSignals(False)
+            self.closing_spin.blockSignals(False)
+            opening = 7
+            closing = 22
+
+        # update heures and preserve existing table values where possible
+        old_values = {}
+        for ri in range(self.table_demande.rowCount()):
+            for ci in range(self.table_demande.columnCount()):
+                item = self.table_demande.item(ri, ci)
+                if item:
+                    old_values[(ri, ci)] = item.text()
+
+        self.heures = list(range(opening, closing))
+        # rebuild table with same number of columns (roles) and new rows
+        cols = list(self.roles.keys())
+        prev_row_count = len(old_values) and self.table_demande.rowCount() or 0
+        self.table_demande.setRowCount(len(self.heures))
+        self.table_demande.setVerticalHeaderLabels([f"{h}h" for h in self.heures])
+        for ri, h in enumerate(self.heures):
+            for ci, role in enumerate(cols):
+                # try to keep value from old_values if same row index existed; else use base_demande
+                prev = None
+                if (ri, ci) in old_values:
+                    try:
+                        prev = int(old_values[(ri, ci)])
+                    except Exception:
+                        prev = None
+                if prev is None:
+                    prev = int(self.base_demande.get(h, {}).get(role, 0))
+                itm = QTableWidgetItem(str(prev))
+                itm.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_demande.setItem(ri, ci, itm)
+
+        self.table_demande.resizeColumnsToContents()
+        self.table_demande.resizeRowsToContents()
+        self._adjust_demande_table_height()
+
+    def _rebuild_demande_table_columns(self):
+        """Rebuild demand table columns when roles change."""
+        cols = list(self.roles.keys())
+        # keep current values where possible
+        current = {}
+        for ri in range(self.table_demande.rowCount()):
+            for ci in range(self.table_demande.columnCount()):
+                it = self.table_demande.item(ri, ci)
+                if it:
+                    current[(ri, ci)] = it.text()
+
+        self.table_demande.clear()
+        self.table_demande.setColumnCount(len(cols))
+        self.table_demande.setHorizontalHeaderLabels([r.capitalize() for r in cols])
+        # ensure row count matches heures
+        self.table_demande.setRowCount(len(self.heures))
+        self.table_demande.setVerticalHeaderLabels([f"{h}h" for h in self.heures])
+        for ri, h in enumerate(self.heures):
+            for ci, role in enumerate(cols):
+                prev = None
+                if (ri, ci) in current:
+                    try:
+                        prev = int(current[(ri, ci)])
+                    except Exception:
+                        prev = None
+                if prev is None:
+                    prev = int(self.base_demande.get(h, {}).get(role, 0))
+                itm = QTableWidgetItem(str(prev))
+                itm.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_demande.setItem(ri, ci, itm)
+        self.table_demande.resizeColumnsToContents()
+        self.table_demande.resizeRowsToContents()
+        self._adjust_demande_table_height()
+
+    def _read_demande_from_table(self):
+        """Return demande dict[h][role] from the table (integers)."""
+        types = list(self.roles.keys())
+        demande = {}
+        for ri, h in enumerate(self.heures):
+            demande[h] = {}
+            for ci, role in enumerate(types):
+                item = self.table_demande.item(ri, ci)
+                val = 0
+                if item:
+                    try:
+                        val = int(float(item.text()))
+                    except Exception:
+                        val = 0
+                demande[h][role] = max(0, val)
+        return demande
+
+    def _build_roles_ui(self):
+        # clear existing rows
+        # remove widgets from form layout
+        while self.form_couts.count():
+            item = self.form_couts.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.role_spins = {}
+        for role, cost in self.roles.items():
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 100000.0)
+            spin.setDecimals(2)
+            spin.setValue(float(cost))
+            spin.setSuffix(" Dinars/h")
+            # keep spin values synced to self.roles (float)
+            spin.valueChanged.connect(lambda val, r=role: self._role_cost_changed(r, val))
+            label = QLabel(role.capitalize())
+            self.form_couts.addRow(label, spin)
+            self.role_spins[role] = spin
+
+        # if constraints table exists, rebuild its columns to match new roles
+        if hasattr(self, "table_demande"):
+            self._rebuild_demande_table_columns()
+
+    def _role_cost_changed(self, role, value):
+        # update roles dict when spin changes
+        self.roles[role] = float(value)
+
+    def edit_commerce_name(self):
+        name, ok = QInputDialog.getText(self, "Modifier nom du commerce", "Nom du commerce:", text=self.commerce_name)
+        if not ok or not name.strip():
+            return
+        self.commerce_name = name.strip()
+        self.title_label.setText(f"{self.commerce_name} — Planification des quarts")
+        self.setWindowTitle(f"Planification du personnel - {self.commerce_name}")
+
+    def manage_roles(self):
+        dlg = RolesDialog(self, self.roles)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_roles = dlg.get_roles()
+            # ensure at least one role remains
+            if not new_roles:
+                QMessageBox.warning(self, "Rôles", "Il faut au moins un rôle.")
+                return
+            self.roles = new_roles
+            self._build_roles_ui()
+            self.status.setText("Rôles mis à jour")
+
+    def _empty_result_html(self):
+        return (
+            '<div style="color:#9fb6c6;">'
+            '<h3 style="color:#7be0ff;margin:6px 0;">Aucun résultat</h3>'
+            '<p style="margin:0;">Cliquez sur <b>Résoudre</b> pour générer la planification et le graphique.</p>'
+            '</div>'
+        )
+
+    def _init_empty_plot(self):
+        # disconnect any hover handler when clearing
+        self._disconnect_hover()
+        self.figure.clear()
+        ax = self.figure.add_subplot(111, facecolor="#0f1720")
+        ax.text(0.5, 0.5, "Aucun résultat\ncliquez sur 'Résoudre'", ha='center', va='center',
+                fontsize=12, color="#7f9da6", alpha=0.9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def zone_resultat_clear(self):
+        self.zone_resultat.clear()
+        self.zone_resultat.setHtml(self._empty_result_html())
+        self._init_empty_plot()
+        self.status.setText("Effacé - prêt")
+        # don't remove saved scenarios
+
+    def _make_results_html(self, shift_list, total_cost, total_staff, peak_overload):
+        # shift_list: list of tuples (start_hour, role, count)
+        rows_html = ""
+        grouped = {}
+        for d, role, cnt in shift_list:
+            grouped.setdefault(d, []).append((role, cnt))
+        for d in sorted(grouped):
+            parts = ", ".join(f"<b style='color:#eaf8ff'>{cnt}</b> {role}" for role, cnt in grouped[d])
+            rows_html += f"<tr><td style='padding:6px 12px;border-bottom:1px solid #122224;'> {d}h </td><td style='padding:6px 12px;border-bottom:1px solid #122224;'>{parts}</td></tr>"
+
+        html = f"""
+        <div style="font-family:Segoe UI, Roboto, Arial; color:#dff6f2;">
+          <h3 style="color:#7be0ff;margin:4px 0;">Résultats optimaux</h3>
+          <p style="color:#9fb6c6;margin:4px 0 10px 0;">Liste des shifts (début) et répartition par rôle :</p>
+          <table style="width:100%; border-collapse:collapse; margin-bottom:12px;">
+            <thead>
+              <tr>
+                <th style="text-align:left;padding:6px 12px;color:#bfefff;border-bottom:2px solid #123233;">Heure</th>
+                <th style="text-align:left;padding:6px 12px;color:#bfefff;border-bottom:2px solid #123233;">Répartition</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows_html}
+            </tbody>
+          </table>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
+            <div style="color:#9fb6c6;">
+              <div>Total staff-hours: <b style='color:#eaf8ff'>{total_staff}</b></div>
+              <div>Peak overload (max surplus employees): <b style='color:#eaf8ff'>{peak_overload}</b></div>
+            </div>
+            <div style="background:linear-gradient(90deg,#16a085,#7be0ff); color:#FFFFFF; padding:8px 14px; border-radius:10px; font-weight:800; font-size:16px;">
+              {total_cost:.2f} Dinars
+            </div>
+          </div>
+        </div>
+        """
+        return html
+
+    def resoudre(self):
+        self.zone_resultat.clear()
+        self.status.setText("Résolution en cours...")
+        QApplication.processEvents()
+
+        # read dynamic inputs
+        types = list(self.roles.keys())
+        heures = list(self.heures)  # dynamic opening..closing-1
+        # read shift length from selector and compute possible start times
+        L = int(self.shift_combo.currentData() or 8)
+        last_start = (self.closing_spin.value()) - L  # inclusive start hour max such that shift covers up to closing-1
+        if last_start < self.opening_spin.value():
+            QMessageBox.warning(self, "Contraintes incompatibles", "La longueur de shift est trop grande pour les heures d'ouverture.")
+            self.status.setText("Contraintes invalides")
+            return
+        debut_shifts = list(range(self.opening_spin.value(), last_start + 1))
+
+        # demande read from demand table (user editable)
+        demande = self._read_demande_from_table()
+
+        # costs
+        cout = {r: float(self.role_spins[r].value()) if r in self.role_spins else float(self.roles[r]) for r in types}
+
+        model = gp.Model("Planification_Supermarche")
+        x = model.addVars(debut_shifts, types, vtype=GRB.INTEGER, lb=0)
+
+        # objective uses L (shift length) * hourly cost
+        model.setObjective(
+            gp.quicksum(L * cout[t] * x[d, t] for d in debut_shifts for t in types),
+            GRB.MINIMIZE
+        )
+
+        # demand constraints
+        for h in heures:
+            for t in types:
+                model.addConstr(
+                    gp.quicksum(
+                        x[d, t]
+                        for d in debut_shifts
+                        if d <= h < d + L
+                    ) >= demande.get(h, {}).get(t, 0)
+                )
+
+        # enforce minimum security agents if role exists
+        min_sec = int(self.min_security_spin.value())
+        # find role key matching 'securite' case-insensitive
+        sec_role = None
+        for r in types:
+            if r.lower() == "securite" or "secur" in r.lower():
+                sec_role = r
+                break
+        if sec_role:
+            for h in heures:
+                model.addConstr(
+                    gp.quicksum(x[d, sec_role] for d in debut_shifts if d <= h < d + L) >= min_sec
+                )
+        else:
+            # notify user that no security role found; constraint ignored
+            if min_sec > 0:
+                QMessageBox.information(self, "Sécurité", "Aucun rôle 'securite' défini — contrainte de sécurité ignorée.")
+
+        model.optimize()
+
+        # handle infeasible model
+        if model.status == GRB.Status.INFEASIBLE:
+            self.status.setText("Modèle infaisable")
+            QMessageBox.warning(self, "Infaisable", "Model infeasible with current constraints.")
+            return
+
+        # collect totals and shift list for results
+        total_par_heure = []
+        shift_list = []
+        # also compute per-hour per-role breakdown for hover
+        per_hour_role = {h: {t: 0 for t in types} for h in heures}
+
+        for h in heures:
+            total = 0
+            for d in debut_shifts:
+                for t in types:
+                    val = getattr(x[d, t], "x", 0) or 0
+                    if d <= h < d + L:
+                        total += int(val)
+                        per_hour_role[h][t] += int(val)
+            total_par_heure.append(total)
+
+        for d in debut_shifts:
+            for t in types:
+                val = getattr(x[d, t], "x", 0) or 0
+                if val > 0:
+                    shift_list.append((d, t, int(val)))
+
+        total_cost = float(getattr(model, "objVal", 0.0))
+
+        # compute comparison metrics
+        demand_total = [sum(demande[h].values()) for h in heures]
+        total_staff = int(sum(total_par_heure))  # staff-hours
+        peak_overload = int(max(0, max((tp - dt) for tp, dt in zip(total_par_heure, demand_total))))
+
+        # store last results for saving
+        self.last_results = {
+            "total_par_heure": total_par_heure,
+            "shift_list": shift_list,
+            "total_cost": total_cost,
+            "total_staff": total_staff,
+            "peak_overload": peak_overload,
+            "per_hour_role": per_hour_role,
+            "params": {"cout": cout, "L": L, "roles": dict(self.roles), "commerce_name": self.commerce_name,
+                       "demande": demande, "min_security": min_sec}
+        }
+
+        # Update results text with styled HTML
+        self.zone_resultat.setHtml(self._make_results_html(shift_list, total_cost, total_staff, peak_overload))
+
+        # Update embedded plot - annotate exact counts above each point
+        self.figure.clear()
+        ax = self.figure.add_subplot(111, facecolor="#0f1720")
+        heures_arr = np.array(heures)
+        totals = np.array(total_par_heure)
+
+        # nicer line + markers + filled area
+        ax.plot(heures_arr, totals, marker='o', color='#16a085', linewidth=2.2, markersize=8)
+        ax.fill_between(heures_arr, totals, color='#145b4f', alpha=0.25)
+
+        # annotate each point with the exact integer count (static small labels)
+        for xpt, ypt in zip(heures_arr, totals):
+            ax.annotate(str(int(ypt)),
+                        xy=(xpt, ypt),
+                        xytext=(0, 8),
+                        textcoords='offset points',
+                        ha='center',
+                        va='bottom',
+                        fontsize=9,
+                        fontweight='700',
+                        color='#eafaf6',
+                        bbox=dict(boxstyle="round,pad=0.2", fc="#0a2421", ec="#123233", alpha=0.9))
+
+        ax.set_xlabel("Heure", fontsize=10, color="#cfeff6")
+        ax.set_ylabel("Total employés", fontsize=10, color="#cfeff6")
+        ax.set_xticks(heures_arr)
+        ax.set_xticklabels([f"{h}h" for h in heures_arr], rotation=0, fontsize=9, color="#9fb6c6")
+        ax.yaxis.set_major_locator(mtick.MaxNLocator(integer=True))
+        ax.tick_params(colors="#9fb6c6")
+        ax.grid(axis='y', linestyle='--', alpha=0.25, color="#122226")
+        ax.set_title(f"{self.commerce_name} — Effectif total par heure (valeurs exactes affichées)", fontsize=11, weight='700', color="#9fe9ff")
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+        # connect hover - show per-role breakdown on mouse hover
+        self._disconnect_hover()
+        self._connect_hover(ax, heures_arr, totals, per_hour_role)
+
+        self.status.setText("Résolution terminée")
+
+    # Scenario feature methods
+    def save_scenario(self):
+        if not self.last_results:
+            QMessageBox.warning(self, "Pas de résultat", "Aucun résultat à sauvegarder. Lancez 'Résoudre' d'abord.")
+            return
+        name, ok = QInputDialog.getText(self, "Nom du scénario", "Entrez un nom pour le scénario :")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if name in self.scenarios:
+            resp = QMessageBox.question(self, "Remplacer ?", f"Le scénario '{name}' existe déjà. Remplacer ?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+        # store a lightweight snapshot
+        snap = {
+            "params": self.last_results.get("params", {}),
+            "total_cost": self.last_results["total_cost"],
+            "total_staff": self.last_results["total_staff"],
+            "peak_overload": self.last_results["peak_overload"],
+            "total_par_heure": self.last_results["total_par_heure"],
+            "shift_list": self.last_results["shift_list"],
+            "per_hour_role": self.last_results.get("per_hour_role", {}),
+            "roles": dict(self.roles),
+            "commerce_name": self.commerce_name
+        }
+        self.scenarios[name] = snap
+        QMessageBox.information(self, "Scénario sauvegardé", f"Scénario '{name}' enregistré.")
+
+    def compare_scenarios(self):
+        if len(self.scenarios) < 2:
+            QMessageBox.information(self, "Comparer scénarios", "Sauvegardez au moins 2 scénarios pour comparer.")
+            return
+        # Build comparison table (HTML)
+        names = list(self.scenarios.keys())
+        rows = ""
+        costs = []
+        staffs = []
+        overloads = []
+        for n in names:
+            s = self.scenarios[n]
+            costs.append(s["total_cost"])
+            staffs.append(s["total_staff"])
+            overloads.append(s["peak_overload"])
+
+        # determine best (min) for cost, staff, overload
+        best_cost = min(costs)
+        best_staff = min(staffs)
+        best_overload = min(overloads)
+
+        for n in names:
+            s = self.scenarios[n]
+            cost = s["total_cost"]
+            staff = s["total_staff"]
+            over = s["peak_overload"]
+            cost_cell = f"<td style='padding:6px 12px;{'background:#163c36;' if cost==best_cost else ''}'> {cost:.2f} € </td>"
+            staff_cell = f"<td style='padding:6px 12px;{'background:#163c36;' if staff==best_staff else ''}'> {staff} </td>"
+            over_cell = f"<td style='padding:6px 12px;{'background:#163c36;' if over==best_overload else ''}'> {over} </td>"
+            rows += f"<tr><td style='padding:6px 12px;border-bottom:1px solid #122224;'>{n}</td>{cost_cell}{staff_cell}{over_cell}</tr>"
+
+        summary_html = f"""
+        <div style="font-family:Segoe UI, Roboto, Arial; color:#dff6f2;">
+          <h3 style="color:#7be0ff;margin:4px 0;">Comparaison des scénarios</h3>
+          <p style="color:#9fb6c6;margin:4px 0 10px 0;">Métriques : coût total (Dinars), total staff-hours, peak overload (max surplus)</p>
+          <table style="width:100%; border-collapse:collapse; margin-bottom:12px;">
+            <thead>
+              <tr>
+                <th style="text-align:left;padding:6px 12px;color:#bfefff;border-bottom:2px solid #123233;">Scénario</th>
+                <th style="text-align:left;padding:6px 12px;color:#bfefff;border-bottom:2px solid #123233;">Coût total</th>
+                <th style="text-align:left;padding:6px 12px;color:#bfefff;border-bottom:2px solid #123233;">Total staff-hours</th>
+                <th style="text-align:left;padding:6px 12px;color:#bfefff;border-bottom:2px solid #123233;">Peak overload</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows}
+            </tbody>
+          </table>
+          <p style="color:#9fb6c6;margin:0;">Les cellules sombres indiquent la meilleure valeur (min).</p>
+        </div>
+        """
+
+        # show in dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Comparaison des scénarios")
+        dlg_layout = QVBoxLayout(dlg)
+        te = QTextEdit()
+        te.setReadOnly(True)
+        te.setAcceptRichText(True)
+        te.setHtml(summary_html)
+        dlg_layout.addWidget(te)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        buttons.accepted.connect(dlg.accept)
+        dlg_layout.addWidget(buttons)
+        dlg.resize(700, 400)
+        dlg.exec()
+
+    # Hover support methods
+    def _connect_hover(self, ax, heures_arr, totals, per_hour_role):
+        """
+        Connect a motion_notify_event handler to show breakdown when hovering near a point.
+        """
+        self._hover_ax = ax
+        self._hover_data = (np.asarray(heures_arr), np.asarray(totals), per_hour_role)
+
+        # create annotation if not exists
+        if self._annot is None:
+            self._annot = ax.annotate(
+                "",
+                xy=(0,0),
+                xytext=(20,20),
+                textcoords="offset points",
+                bbox=dict(boxstyle="round", fc="#021414", ec="#145b4f", alpha=0.95),
+                fontsize=9,
+                color="#eafaf6",
+                visible=False
+            )
+
+        # connect if not already
+        if self._hover_cid is None:
+            self._hover_cid = self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+
+    def _disconnect_hover(self):
+        if self._hover_cid is not None:
+            try:
+                self.canvas.mpl_disconnect(self._hover_cid)
+            except Exception:
+                pass
+        self._hover_cid = None
+        # hide annotation
+        if self._annot is not None:
+            try:
+                self._annot.set_visible(False)
+            except Exception:
+                pass
+        self._hover_ax = None
+        self._hover_data = None
+        # redraw to remove leftover annotation
+        try:
+            self.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _on_motion(self, event):
+        # event.x, event.y are display coords; event.inaxes indicates current axes
+        if event.inaxes is None or self._hover_data is None:
+            if self._annot is not None and self._annot.get_visible():
+                self._annot.set_visible(False)
+                self.canvas.draw_idle()
+            return
+
+        ax = event.inaxes
+        if ax != self._hover_ax:
+            return
+
+        heures_arr, totals, per_hour_role = self._hover_data
+        # compute display coords for data points
+        trans = ax.transData.transform
+        data_xy = np.column_stack((heures_arr, totals))
+        disp_xy = trans(data_xy)  # Nx2 array of pixel coords
+        ex, ey = event.x, event.y
+        # compute distances in pixels
+        dists = np.hypot(disp_xy[:,0] - ex, disp_xy[:,1] - ey)
+        idx = int(np.argmin(dists))
+        # threshold in pixels for hover activation
+        if dists[idx] < 12:
+            hour = int(heures_arr[idx])
+            total = int(totals[idx])
+            role_counts = per_hour_role.get(hour, {})
+            # build plain-text tooltip (no HTML) with dynamic roles
+            lines = [f"{hour}h — total: {total}"]
+            for r in sorted(self.roles.keys()):
+                cnt = role_counts.get(r, 0)
+                lines.append(f"{r.capitalize():10}: {cnt}")
+            txt = "\n".join(lines)
+            # show annotation at the data point
+            self._annot.xy = (heures_arr[idx], totals[idx])
+            self._annot.set_text(txt)
+            # style bbox / text for better readability
+            bbox = self._annot.get_bbox_patch()
+            bbox.set_alpha(0.95)
+            bbox.set_facecolor("#021414")
+            bbox.set_edgecolor("#145b4f")
+            self._annot.set_visible(True)
+            self.canvas.draw_idle()
+        else:
+            if self._annot is not None and self._annot.get_visible():
+                self._annot.set_visible(False)
+                self.canvas.draw_idle()
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+
+    # show initial configuration dialog (commerce name + roles)
+    start = StartDialog()
+    if start.exec() != QDialog.DialogCode.Accepted:
+        sys.exit(0)
+
+    commerce_name, roles = start.get_values()
+
+    fenetre = FenetrePrincipale(commerce_name=commerce_name, roles=roles)
+    # Open the main window in fullscreen mode
+    fenetre.showFullScreen()
+    sys.exit(app.exec())
