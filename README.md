@@ -18,18 +18,44 @@ A sophisticated PyQt6-based application for optimizing supermarket staff schedul
 ### Prerequisites
 - Python 3.8 or higher
 - pip package manager
+- A desktop environment (the app requires a graphical display)
 
-### Dependencies
+### System Dependencies (Linux)
+
+Before installing Python packages, install the required system library for Qt:
+
 ```bash
-pip install PyQt6 numpy matplotlib scipy
+sudo apt install libxcb-cursor0
 ```
 
-### Clone and Run
+> ⚠️ Without this, the app will crash with: `Could not load the Qt platform plugin "xcb"`
+
+### Setup
+
 ```bash
+# 1. Clone the repository
 git clone https://github.com/idrissrb/supermarket-scheduler.git
 cd supermarket-scheduler
-python ihm_supermarche.py
+
+# 2. Create a virtual environment (required on modern Linux/Debian systems)
+python3 -m venv venv
+
+# 3. Activate the virtual environment
+source venv/bin/activate        # Linux/macOS
+# venv\Scripts\activate         # Windows
+
+# 4. Install all dependencies
+pip install PyQt6 matplotlib scipy numpy gurobipy
+
+# 5. Run the app
+python3 ihm_supermarche.py
 ```
+
+> ℹ️ Always activate the virtual environment before running the app:
+> ```bash
+> source venv/bin/activate
+> python3 ihm_supermarche.py
+> ```
 
 ## 💡 Usage
 
@@ -53,6 +79,7 @@ python ihm_supermarche.py
 ```
 supermarket-scheduler/
 ├── ihm_supermarche.py          # Main GUI application
+├── theme.py                    # Dark theme configuration
 ├── supermarche/                # Core package
 │   ├── __init__.py            # Package initialization
 │   ├── dialogs.py             # Configuration dialogs
@@ -133,29 +160,34 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## 🐛 Troubleshooting
 
-### Common Issues
-
-**PyQt6 Import Error**
+### `ModuleNotFoundError: No module named 'PyQt6'` (or matplotlib, scipy, etc.)
+Make sure your virtual environment is activated and all packages are installed:
 ```bash
-pip install PyQt6
+source venv/bin/activate
+pip install PyQt6 matplotlib scipy numpy gurobipy
 ```
 
-**Optimization Fails**
+### `externally-managed-environment` error when using pip
+Do **not** use `pip install` directly on modern Debian/Ubuntu systems. Always use a virtual environment:
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install PyQt6 matplotlib scipy numpy gurobipy
+```
+
+### `Could not load the Qt platform plugin "xcb"`
+Install the missing system library:
+```bash
+sudo apt install libxcb-cursor0
+```
+
+### Optimization Fails
 - Ensure demand values are reasonable
 - Check that opening time is before closing time
 - Verify at least one role is configured
 
-**GUI Doesn't Start**
-- Ensure all dependencies are installed
-- Check Python version (3.8+ required)
-- Try running with `python3` instead of `python`
-
-## 📞 Support
-
-If you encounter any issues or have questions:
-1. Check the troubleshooting section above
-2. Review the code comments for implementation details
-3. Open an issue on GitHub
+### GUI Doesn't Start on a Remote Server / WSL
+The app requires a graphical display. Run it on a local machine with a desktop environment, or configure X11 forwarding if using SSH.
 
 ## 🔄 Version History
 
@@ -163,5 +195,4 @@ If you encounter any issues or have questions:
 
 ---
 
-**Built with ❤️ using PyQt6, NumPy, and SciPy**</content>
-<parameter name="filePath">/home/idriss/projet_ro/idriss_pb19_app3/README.md
+**Built with ❤️ using PyQt6, NumPy, and SciPy**
