@@ -1,8 +1,8 @@
-# 🏪 Supermarket Staff Scheduler
+#  Supermarket Staff Scheduler
 
 A sophisticated PyQt6-based application for optimizing supermarket staff scheduling with minimal cost while meeting demand requirements. Features an intuitive graphical interface for managing roles, costs, and shift planning.
 
-## 📋 Features
+##  Features
 
 - **Interactive GUI**: Modern PyQt6 interface with dark theme
 - **Staff Role Management**: Add/remove roles with custom hourly costs
@@ -13,7 +13,7 @@ A sophisticated PyQt6-based application for optimizing supermarket staff schedul
 - **Flexible Hours**: Configurable opening and closing times
 - **Role-based Staffing**: Different staff counts per role per hour
 
-## 🚀 Installation
+##  Installation
 
 ### Prerequisites
 - Python 3.8 or higher
@@ -28,7 +28,7 @@ Before installing Python packages, install the required system library for Qt:
 sudo apt install libxcb-cursor0
 ```
 
-> ⚠️ Without this, the app will crash with: `Could not load the Qt platform plugin "xcb"`
+>  Without this, the app will crash with: `Could not load the Qt platform plugin "xcb"`
 
 ### Setup
 
@@ -51,13 +51,13 @@ pip install PyQt6 matplotlib scipy numpy gurobipy
 python3 ihm_supermarche.py
 ```
 
-> ℹ️ Always activate the virtual environment before running the app:
+>  Always activate the virtual environment before running the app:
 > ```bash
 > source venv/bin/activate
 > python3 ihm_supermarche.py
 > ```
 
-## 💡 Usage
+##  Usage
 
 1. **Initial Setup**:
    - Enter your supermarket name
@@ -74,7 +74,7 @@ python3 ihm_supermarche.py
    - Hover over chart points for detailed information
    - Export results to CSV if needed
 
-## 🏗️ Project Structure
+##  Project Structure
 
 ```
 supermarket-scheduler/
@@ -89,7 +89,7 @@ supermarket-scheduler/
 └── README.md                  # This file
 ```
 
-## 🔧 Technical Details
+##  Technical Details
 
 ### Optimization Algorithm
 The application uses linear programming to minimize total staffing costs while ensuring:
@@ -125,7 +125,7 @@ The application uses linear programming to minimize total staffing costs while e
 - Hour range formatting
 - Chart generation helpers
 
-## 🎨 Interface Features
+##  Interface Features
 
 - **Dark Theme**: Modern, easy-on-the-eyes interface
 - **Interactive Tables**: Double-click to edit demand values
@@ -133,7 +133,7 @@ The application uses linear programming to minimize total staffing costs while e
 - **Hover Tooltips**: Detailed information on chart hover
 - **Responsive Layout**: Adapts to window resizing
 
-## 📊 Output Formats
+##  Output Formats
 
 ### Schedule Results
 - Hourly breakdown of required staff per role
@@ -146,7 +146,7 @@ The application uses linear programming to minimize total staffing costs while e
 - Compatible with spreadsheet applications
 - Includes all scheduling details
 
-## 🤝 Contributing
+##  Contributing
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
@@ -154,11 +154,11 @@ The application uses linear programming to minimize total staffing costs while e
 4. Push to the branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
 
-## 📝 License
+##  License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🐛 Troubleshooting
+##  Troubleshooting
 
 ### `ModuleNotFoundError: No module named 'PyQt6'` (or matplotlib, scipy, etc.)
 Make sure your virtual environment is activated and all packages are installed:
@@ -189,7 +189,7 @@ sudo apt install libxcb-cursor0
 ### GUI Doesn't Start on a Remote Server / WSL
 The app requires a graphical display. Run it on a local machine with a desktop environment, or configure X11 forwarding if using SSH.
 
-## 🔄 Version History
+##  Version History
 
 - **v1.0.0**: Initial release with full PyQt6 GUI and optimization engine
 
